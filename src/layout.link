@@ -1,0 +1,42 @@
+ROM0
+    org $0040
+    "vblank"
+
+    org $0048
+    "lcd"
+
+    org $0050
+    "timer"
+
+    org $0058
+    "serial"
+
+    org $0060
+    "joypad"
+
+    org $100
+    "Header"
+
+    org $1000
+    "Main"
+
+    "Shader"
+
+    org $2000
+    "COS_LOG_LOOKUP"
+
+    ; This must be exactly $0100 after COS_LOG_LOOKUP
+    ; Assumptions in our code require it
+    org $2100
+    "POW_LOOKUP"
+
+WRAM0
+
+    org $C000
+    "MainMem"
+
+    org $D000
+
+HRAM
+    org $FF80
+    "ShaderHRAM"
