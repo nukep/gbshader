@@ -1,11 +1,12 @@
 section "ShaderHRAM", HRAM
-; nLt - Negative L-theta
-nLt: db
+; Lt: L-theta
+Shader_Lt:: db
+
 num_rows: db
 old_stack_ptr: dw
 
 
-section "Shader", ROM0
+section "ShaderROM", ROM0
 
 ; Pseudocode:
 ;     For each row of pixels:
@@ -16,7 +17,7 @@ section "Shader", ROM0
 ;             m_log = *In++
 ;             b = *In++
 
-;             i = Nt + nLt
+;             i = Nt - Lt
 ;             j = cos_log_lookup[i]
 ;             k = m_log + j
 ;             l = pow_lookup[k]
@@ -43,11 +44,8 @@ section "Shader", ROM0
 ;   DE = In pointer
 ;   HL = Out pointer
 ;   A = number of rows (Note: 0 = 256)
-;
-; Performance (including the call):
-; 9492 cycles per 8 rows
-; 1168 cycles per row + 148 cycles of constant overhead
-; 
+RunShaderROM:
+LOAD "ShaderExecutable", WRAM0
 RunShader::
     ; Set stack to the output pointer
     ld [old_stack_ptr], sp
@@ -71,18 +69,15 @@ RunShader::
     ; Unrolled loop. Doing this instead of using a counter saves precious cycles!
     ; (ld b, 8; ...; dec b; jr nz .loop) - is about 8 + 4 + 12 (8 on final branch) = 8 + (4+12)*7 + (4+8) = 132 cycles of overhead
 
+    ; Each iteration of the REPT loop below is 136 cycles
     REPT 8
 .loop\@:
     ; Nt = *In++
     ld a, [hl+]
-    ld c, a
     
-    ; i = Nt + nLt
-    ; TODO - turn into self-modifyable code.
-    ; Can be replaced with "add a, <num>", which is 8 cycles.
-    ; The below 2 lines are 20 cycles!
-    ld a, [nLt]
-    add c
+    ; i = Nt - Lt
+.inject_lt\@:
+    sub a, 0
     ; A = i
     
     ; j = cos_log[i]
@@ -123,13 +118,6 @@ RunShader::
     ; 4 cycles
     xor a
 
-    ; ; 16 cycles
-    ; sla d
-    ; sla e
-    
-    ; ; 12 cycles to branch
-    ; jr .continue\@
-    
 .positive\@:
     ; 12 cycles to branch
 
@@ -168,4 +156,50 @@ RunShader::
     ld l, e
     ld sp, hl
     
+    ret
+RunShader_End:
+
+DEF ShaderROMLength EQU (RunShader_End - RunShader)
+
+
+section "Shader", ROM0
+
+
+; Copy bytes from one area to another.
+; de: Source
+; hl: Destination
+; bc: Length
+; Source: https://gbdev.io/gb-asm-tutorial/part2/functions.html
+Memcpy:
+    ld a, [de]
+    ld [hl+], a
+    inc de
+    dec bc
+    ld a, b
+    or a, c
+    jp nz, Memcpy
+    ret
+
+; Copies the shader ROM to RAM
+CopyShaderCode::
+    ld de, RunShaderROM
+    ld hl, RunShader
+    ld bc, ShaderROMLength
+    jr Memcpy
+
+MACRO LD_INJECT
+    ld [(\1)], a
+ENDM
+
+; Modify the shader executable using the state of the program, such as the light position.
+SetShaderState::
+    ld a, [Shader_Lt]
+    LD_INJECT RunShader.inject_lt_u1+1
+    LD_INJECT RunShader.inject_lt_u2+1
+    LD_INJECT RunShader.inject_lt_u3+1
+    LD_INJECT RunShader.inject_lt_u4+1
+    LD_INJECT RunShader.inject_lt_u5+1
+    LD_INJECT RunShader.inject_lt_u6+1
+    LD_INJECT RunShader.inject_lt_u7+1
+    LD_INJECT RunShader.inject_lt_u8+1
     ret

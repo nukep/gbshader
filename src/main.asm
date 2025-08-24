@@ -3,6 +3,9 @@ INCLUDE "hardware.inc"
 SECTION "MainHRAM", HRAM
     hFoo:: db
 
+SECTION "rst", ROM0
+; ds $40
+
 SECTION "vblank", ROM0
     jp VBlank
 
@@ -22,31 +25,54 @@ SECTION "Header", ROM0[$0100]
 EntryPoint:
     jp Main
 
+; Fill this area with zeros to make sure nothing else allocates to the header
+ds $50 - 3
 
-SECTION "MainMem", WRAM0
+
+SECTION "DMA", WRAM0
 OUT:
-    ds 256
+    ; Support up to 16 tiles (16 bytes each)
+    ds 16*16
 OUT_BOTTOM:
 
 
+SECTION "MainMem", WRAM0
+
+VBlankRoutine:
+    dw
+
+NumTileChunks:
+    db
+TileChunkCounter:
+    db
+TileChunkPtr:
+    dw
+CurTileChunkPtr:
+    dw
+Render_TileStart:
+    db
+Render_NumTiles:
+    db
+
 SECTION "Main",ROM0
 
-Main:
-    call DoubleSpeed
+MACRO SET_VBLANK
+    ld a, LOW(\1)
+    ld [VBlankRoutine], a
+    ld a, HIGH(\1)
+    ld [VBlankRoutine+1], a
+ENDM
 
+Main:
     ld sp, $ffff
     call ClearWRam
     ld sp, $dfff
     call ClearHRam
 
-    ld a, -8
-    ld [$ff80], a
+    SET_VBLANK VBlank_Init
 
-    ld de, IN
-    ld hl, OUT_BOTTOM
-    ld a, 7
-
-    call RunShader
+    call DoubleSpeed
+    call CopyShaderCode
 
 
     ; Shut down audio circuitry
@@ -71,13 +97,7 @@ Main:
     ld a, 0
     ld [rLCDC], a
 
-
-    ld de, Main
-    ld hl, $8000
-    ld b, 14
-    ; Takes 1060 cycles for 14 tiles
-    call VRamDma
-
+    call SetPalette
     ; ...
 
     ; Turn the LCD on
@@ -96,35 +116,259 @@ Main:
 
     jr .loop
 
+MACRO HEXCOLOR
+    dw ((\1) >> 3) | (((\2) >> 3) << 5) | (((\3) >> 3) << 10)
+ENDM
 
-IN:
-    ; L_theta = 8
+Palette:
+    ; #221920
+    ; #594156
+    ; #77557C
+    ; #FFFFFF
 
-    REPT 8
-    db 11, 10, 4
-    ; 1 (44)
-    db 230, 7, 19
-    ; 1 (59)
-    db 83, 9, 8
-    ; 0 (251)
-    db 255, 7, 21
-    ; 2 (78)
-    db 18, 9, 9
-    ; 1 (54)
-    db 225, 7, 19
-    ; 1 (51)
-    db 184, 21, 250
-    ; 0 (246)
-    db 129, 10, 3
-    ; 0 (219)
-    ENDR
+    HEXCOLOR $22, $19, $20
+    HEXCOLOR $59, $41, $56
+    HEXCOLOR $77, $55, $7C
+    HEXCOLOR $FF, $FF, $FF
 
-    ; Should yield:
-    ; Low:  11001100
-    ; High: 00010000
+SetPalette:
+    ; Write to the BG palette RAM at address 0. Bit 7 = auto-increment.
+    ld a, $80
+    ldh [rBCPS], a
 
+    ld hl, Palette
+    ld b, 8
+.copy_loop:
+    ld a, [hl+]
+    ldh [rBCPD], a
+    dec b
+    jr nz, .copy_loop
+
+    ret
+
+
+; Writes the tilemap to VRAM, and initializes frame data
+;
+; Input:
+;   HL = Pointer to frame data
+SetupFrame:
+    ; Read layout data
+.read_layout_command
+    ld a, [hl+]
+    cp a, $80
+    jr nz, .cont1
+
+    ; T_POS
+    ; The VRAM address to write to
+    ld a, [hl+]
+    ld e, a
+    ld a, [hl+]
+    ld d, a
+
+    jr .read_layout_command
+
+.cont1
+    cp a, $81
+    jr nz, .cont2
+
+    ; T_END
+
+    jr .done_layout
+
+.cont2
+
+    ; T_TILE
+    ; A = tile number
+
+    ld [de], a
+    inc de
+
+    jr .read_layout_command
+
+.done_layout
+
+    ld a, [hl+]
+    ; A = number of tile chunks
+
+    ld [NumTileChunks], a
+    ld [TileChunkCounter], a
+
+    ld a, l
+    ld [TileChunkPtr], a
+    ld [CurTileChunkPtr], a
+    ld a, h
+    ld [TileChunkPtr+1], a
+    ld [CurTileChunkPtr+1], a
+
+    ret
 
 VBlank:
+    ; Load the VBlankRoutine function pointer and jump to it
+    ld a, [VBlankRoutine]
+    ld l, a
+    ld a, [VBlankRoutine+1]
+    ld h, a
+    jp hl
+
+VBlank_Init:
+    SET_VBLANK VBlank_ClearScreen
+    reti
+
+VBlank_ClearScreen:
+    ; Set to tile 127
+    ld a, 127
+
+    ld hl, $9800
+    ld de, 12
+
+    ; 18 rows
+    ld b, 18
+.loop1
+
+    ; 20 columns
+REPT 20
+    ld [hl+], a
+ENDR
+
+    ; Add 12 to get to the next row
+    add hl, de
+
+    dec b
+    jr nz, .loop1
+
+    SET_VBLANK VBlank_SetupFrame
+    reti
+
+VBlank_SetupFrame:
+    ld hl, FRAME1
+    call SetupFrame
+    SET_VBLANK VBlank_Shader
+    reti
+
+; Returns BC = A << 4
+Shl_A_4_To_BC:
+    swap a
+    ld b, a
+    and a, $F0
+    ld c, a
+    ; C = a << 4
+    ld a, b
+    and a, $0F
+    ld b, a
+    ; B = a >> 4
+    ; BC = a << 4
+    ret
+
+VBlank_Shader:
+    ; DMA whatever we computed last frame
+    ; Write to $9000 + (16*tile_start)
+    ; tile_start is between 0 and 127 inclusive.
+    ld a, [Render_TileStart]
+    call Shl_A_4_To_BC
+    ld hl, $9000
+    add hl, bc
+    ; HL = $9000 + (16*tile_start)
+
+    ld a, [Render_NumTiles]
+    ld b, a
+
+    ld de, OUT
+    ; HL = 9000 + (16*tile_start)
+    ; DE = OUT
+    ; B = num_tiles
+    call VRamDma
+
+    ; Run the shader
+
+
+    ld a, [Shader_Lt]
+    inc a
+    ld [Shader_Lt], a
+    call SetShaderState
+
+    ; Load 
+
+    ld a, [CurTileChunkPtr]
+    ld l, a
+    ld a, [CurTileChunkPtr+1]
+    ld h, a
+
+    ld a, [hl+]
+    ; A = ROM bank
+    ; Switch bank! (MBC3)
+    ld [$2000], a
+
+    ld a, [hl+]
+    ld e, a
+    ld a, [hl+]
+    ld d, a
+    ; DE = Source data address
+
+    ld a, [hl+]
+    ; A = number of tiles
+    ld [Render_NumTiles], a
+
+    ld a, [hl+]
+    ; A = first tile number
+    ld [Render_TileStart], a
+
+    ld a, [Render_NumTiles]
+    ; A = number of tiles (note: always between 0 and 31)
+
+    call Shl_A_4_To_BC
+    ld hl, OUT
+    add hl, bc
+    ; HL = OUT + number_of_tiles*16
+
+    ld a, [Render_NumTiles]
+    swap a
+    rrca
+    ; A = number_of_tiles*8
+
+    ; DE = Source data address
+    ; HL = OUT + number_of_tiles*16
+    ; A = number_of_tiles*8
+    call RunShader
+
+    ; Update the pointers
+
+    ld a, [TileChunkCounter]
+    dec a
+    jr nz, .nonzero
+
+    ; Counter is zero.
+    ; Reset the variables.
+
+    ; TileChunkCounter = NumTileChunks
+    ld a, [NumTileChunks]
+    ld [TileChunkCounter], a
+
+    ; CurTileChunkPtr = TileChunkPtr
+    ld a, [TileChunkPtr]
+    ld [CurTileChunkPtr], a
+    ld a, [TileChunkPtr+1]
+    ld [CurTileChunkPtr+1], a
+
+    jr .done
+
+.nonzero:
+    ; TileChunkCounter -= 1
+    ld [TileChunkCounter], a
+
+    ; CurTileChunkPtr += 5
+    ld a, [CurTileChunkPtr]
+    ld l, a
+    ld a, [CurTileChunkPtr+1]
+    ld h, a
+    ld bc, 5
+    add hl, bc
+    ld a, l
+    ld [CurTileChunkPtr], a
+    ld a, h
+    ld [CurTileChunkPtr+1], a
+
+.done:
+
     reti
 
 
@@ -151,6 +395,7 @@ DoubleSpeed:
 ;   DE = Source address. The lower 4 bytes are ignored.
 ;   HL = Destination address. The lower 4 bytes are ignored.
 ;   B  = number of bytes divided by 16
+; Leaves DE and HL alone.
 VRamDma:
     dec b
 

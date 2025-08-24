@@ -1,4 +1,7 @@
 ROM0
+    org $0000
+    "rst"
+
     org $0040
     "vblank"
 
@@ -19,7 +22,7 @@ ROM0
 
     org $1000
     "Main"
-
+    "ShaderROM"
     "Shader"
 
     org $2000
@@ -33,6 +36,10 @@ ROM0
 WRAM0
 
     org $C000
+    ; Must be aligned on a 16-byte boundary
+    "DMA"
+
+    "ShaderExecutable"
     "MainMem"
 
     org $D000

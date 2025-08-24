@@ -1,0 +1,23 @@
+MACRO T_POS
+db $80
+dw ($9800 + (\1) + ((\2)*$20))
+ENDM
+
+MACRO T_TILE
+db (\1) & $7F
+ENDM
+
+MACRO T_END
+db $81
+ENDM
+
+MACRO TILECHUNKS
+db (\1)
+ENDM
+
+MACRO TILECHUNK
+db BANK(\1)
+dw (\1)
+db (\2)
+db (\3)
+ENDM

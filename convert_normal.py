@@ -1,9 +1,9 @@
 import numpy as np
 import math
+import argparse
 
 from multiplication import Mult
 
-import argparse
 
 
 mult = Mult()
@@ -43,9 +43,10 @@ def load_exr_layer(path, layer_name):
 
 
 def solve_coefficients(x, y, z, Lz):
-    if x*x + y*y + z*z < 0.1:
+    dist2 = x*x + y*y + z*z
+    if dist2 < 0.25:
         # This is probably empty space
-        return (0.0, 0.0, 0.0)
+        return None
 
     n_theta = np.atan2(y, x)
     
@@ -55,22 +56,35 @@ def solve_coefficients(x, y, z, Lz):
     return (n_theta, m, b)
 
 
-def solve_coefficients_gameboy(x, y, z, Lz, L_theta=None):
-    n_theta, m, b = solve_coefficients(x, y, z, Lz)
+# Coefficients to solve for lerp(a1, a2, dot_product)
+REMAP_A1 = 0.2
+REMAP_A2 = 0.770
+
+
+def solve_coefficients_gameboy(x, y, z, Lz):
+    coeffs = solve_coefficients(x, y, z, Lz)
+    if coeffs is None:
+        # Darkest
+        return 0, mult.float_to_log(0), 0
+
+        # Brightest
+        return 0, mult.float_to_log(0), 0b01110000
+
+    n_theta, m, b = coeffs
     n_theta = round(n_theta / (2 * np.pi) * 256) & 0xFF
 
-    m = mult.float_to_log(m * 0.5)
-    b = mult.float_to_fixed(b * 0.5 + 0.2)
+    m = (REMAP_A2 - REMAP_A1) * m
+    b = (REMAP_A2 - REMAP_A1) * b + REMAP_A1
 
-    if L_theta is not None:
-        L_theta = round(L_theta / (2 * np.pi) * 256) & 0xFF
-        return n_theta, m, b, L_theta
-    else:
-        return n_theta, m, b
+    m = mult.float_to_log(m)
+    b = mult.float_to_fixed(b)
+
+    return n_theta, m, b
 
 
 def solve_dot(x, y, z, Lz, L_theta):
-    n_theta, m_log, b, L_theta = solve_coefficients_gameboy(x, y, z, Lz, L_theta)
+    n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
+    L_theta = round(L_theta / (2 * np.pi) * 256) & 0xFF
 
     v = mult.log_to_fixed(m_log + mult.cos_fixed_to_log(n_theta - L_theta)) + b
 
@@ -110,6 +124,27 @@ class TileCollection:
         return iter(self._tiles)
 
 
+class RomBankAllocator:
+    def __init__(self, label_prefix):
+        self._label_prefix = label_prefix
+        self._data = []
+
+    def allocate(self, data):
+        i = len(self._data)+1
+        label = f'{self._label_prefix}_{i}'
+        self._data.append((label, data))
+        return label
+
+    def finish(self):
+        out = ''
+        for label, data in self._data:
+            out += f'SECTION "{label}", ROMX\n'
+            out += f'{label}::\n'
+            out += 'db ' + (','.join(f'${x:02X}' for x in data)) + '\n'
+        
+        return out
+
+
 def count_empty(tile):
     empty = np.array([0.0, 0.0, 0.0])
     mask = (tile == empty).all(axis=len(tile.shape)-1)
@@ -129,7 +164,7 @@ def convert_to_tiles(normals):
             num_empty = count_empty(tile)
             num_full = 64 - num_empty
 
-            if num_full <= 4:
+            if num_full <= 3:
                 # Discard this tile
                 if num_full > 0:
                     coll.log_dropped(j, i)
@@ -150,6 +185,9 @@ if __name__ == '__main__':
     parser.add_argument('--output_rendered_frames')
 
     args = parser.parse_args()
+
+    # Make the noise reproducable
+    np.random.seed(0)
 
     normals = load_exr_layer(args.input_image, args.exr_layer_name)
     H,W,_ = normals.shape
@@ -204,7 +242,7 @@ if __name__ == '__main__':
         ]
         GB_PALETTE = [np.array(x) for x in GB_PALETTE]
 
-        NUM_FRAMES = 40
+        NUM_FRAMES = 64
 
         for frame in range(NUM_FRAMES):
             rows = []
@@ -224,26 +262,70 @@ if __name__ == '__main__':
             print(f'Wrote {out_path}')
     
     if args.output_gb_data:
-        coll = convert_to_tiles(normals)
-
-        for x,y,tile in coll:
-            if x == 7 and y == 7:
-                break
-        
-        # Write the tiles in reverse order and with reversed rows. Columns are the same order.
-        # The shader decrements its output buffer pointer as it progresses, so we have to compensate this way.
-
-        data = bytearray()
-
-        for row in reversed(tile):
-            for normal in row:
-                x,y,z = normal
-                n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
-                data += bytearray([n_theta, m_log, b])
-                # print(n_theta, m_log, b)
-        
         filepath = args.output_gb_data
-        with open(filepath, 'wb') as f:
-            f.write(data)
+
+        coll = convert_to_tiles(normals)
+        all_tiles = list(coll)
+
+        outfile = open(filepath, 'w')
+
+        def output(s):
+            print(s, file=outfile)
+        
+        # Tile layout
+
+        prev_xy = (None, None)
+        for i, (tx, ty, _) in enumerate(all_tiles):
+            if prev_xy[0] == tx-1 and prev_xy[1] == ty:
+                # This tile is immediately to the right of the previous one
+                # We don't need to encode POS
+                pass
+            else:
+                output(f'T_POS {tx}, {ty}')
+            output(f'T_TILE {i}')
+            prev_xy = tx, ty
+        output('T_END')
+        
+        # Tile chunks
+
+        # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
+        MAX_CHUNK_SIZE = 15
+
+        allocator = RomBankAllocator('NORMALDATA')
+
+
+        def encode_tiles(tiles):
+            # Write the tiles in reverse order and with reversed rows. Columns are the same order.
+            # The shader decrements its output buffer pointer as it progresses, so we have to compensate this way.
+
+            data = bytearray()
+
+            for tx, ty, tile in reversed(tiles):
+                for row in reversed(tile):
+                    for normal in row:
+                        x,y,z = normal
+                        n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
+                        data += bytearray([n_theta, m_log, b])
+            
+            return data
+
+        num_chunks = math.ceil(len(all_tiles) / MAX_CHUNK_SIZE)
+        output(f'TILECHUNKS {num_chunks}')
+        for ch in range(num_chunks):
+            tiles = all_tiles[ch*MAX_CHUNK_SIZE : (ch+1)*MAX_CHUNK_SIZE]
+            num_tiles = len(tiles)
+            first_tile_num = ch*MAX_CHUNK_SIZE
+
+            data = encode_tiles(tiles)
+
+            data_label = allocator.allocate(data)
+
+            output(f'TILECHUNK {data_label}, {num_tiles}, {first_tile_num}')
+
+        output(allocator.finish())
+
+        print(f'Number of tiles: {len(all_tiles)}')
+
+        outfile.close()
 
         print(f'Wrote {filepath}')
