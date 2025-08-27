@@ -8,8 +8,26 @@ from multiplication import Mult
 
 mult = Mult()
 
+def mask_dilate(a):
+    '''
+    Perform a box dilation on the input mask array
+    '''
+    from scipy import ndimage
 
-# Source for EXR loading logic: ChatGPT
+    return ndimage.binary_dilation(a, [
+        [False, True, False],
+        [True, True, True],
+        [False, True, False],
+    ])
+
+def mask_outline(a):
+    '''
+    Perform a dilation, followed by setting the inside to False.
+    '''
+    return mask_dilate(a) ^ a
+
+
+# Source for EXR loading logic: ChatGPT (with manual modifications afterwards)
 def load_exr_layer(path, layer_name):
     import OpenEXR, Imath
 
@@ -25,15 +43,20 @@ def load_exr_layer(path, layer_name):
 
     # Find all channels belonging to this layer
     all_channels = header['channels'].keys()
-    layer_channels = [ch for ch in all_channels if ch.startswith(layer_name)]
+    layer_channels = [ch[len(layer_name)+1:] for ch in all_channels if ch.startswith(layer_name + '.')]
 
     if not layer_channels:
         raise ValueError(f"Layer '{layer_name}' not found. Available: {list(all_channels)}")
 
-    # Example: layer_channels might be ['Normal.X', 'Normal.Y', 'Normal.Z']
+    # Pick X, Y, Z or R, G, B.
+    if 'X' in layer_channels and 'Y' in layer_channels and 'Z' in layer_channels:
+        picked_channels = ['X', 'Y', 'Z']
+    elif 'R' in layer_channels and 'G' in layer_channels and 'B' in layer_channels:
+        picked_channels = ['R', 'G', 'B']
+
     channel_data = []
-    for ch in sorted(layer_channels):  # Sort so X,Y,Z are consistent
-        raw = exr_file.channel(ch, FLOAT)
+    for ch in picked_channels:
+        raw = exr_file.channel(f'{layer_name}.{ch}', FLOAT)
         arr = np.frombuffer(raw, dtype=np.float32).reshape((height, width))
         channel_data.append(arr)
 
@@ -43,11 +66,6 @@ def load_exr_layer(path, layer_name):
 
 
 def solve_coefficients(x, y, z, Lz):
-    dist2 = x*x + y*y + z*z
-    if dist2 < 0.25:
-        # This is probably empty space
-        return None
-
     n_theta = np.atan2(y, x)
     
     m = np.sqrt(1 - Lz*Lz) * np.sqrt(1 - z*z)
@@ -62,15 +80,18 @@ REMAP_A2 = 0.770
 
 
 def solve_coefficients_gameboy(x, y, z, Lz):
-    coeffs = solve_coefficients(x, y, z, Lz)
-    if coeffs is None:
-        # Darkest
+    dist2 = x*x + y*y + z*z
+    if dist2 < 0.25:
+        # This is probably empty space
+        # Return the darkest color
         return 0, mult.float_to_log(0), 0
-
-        # Brightest
+    if dist2 > 2.0:
+        # This is probably an outline
+        # Return the brightest color
         return 0, mult.float_to_log(0), 0b01110000
 
-    n_theta, m, b = coeffs
+    n_theta, m, b = solve_coefficients(x, y, z, Lz)
+
     n_theta = round(n_theta / (2 * np.pi) * 256) & 0xFF
 
     m = (REMAP_A2 - REMAP_A1) * m
@@ -139,7 +160,7 @@ class RomBankAllocator:
         out = ''
         for label, data in self._data:
             out += f'SECTION "{label}", ROMX\n'
-            out += f'{label}::\n'
+            out += f'{label}:\n'
             out += 'db ' + (','.join(f'${x:02X}' for x in data)) + '\n'
         
         return out
@@ -164,7 +185,7 @@ def convert_to_tiles(normals):
             num_empty = count_empty(tile)
             num_full = 64 - num_empty
 
-            if num_full <= 3:
+            if num_full <= 1:
                 # Discard this tile
                 if num_full > 0:
                     coll.log_dropped(j, i)
@@ -181,6 +202,7 @@ if __name__ == '__main__':
     parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
     parser.add_argument('--noise', type=float, default=0.0)
     parser.add_argument('--light_z', '-lz', type=float, default=0.4)
+    parser.add_argument('--label_prefix', default='')
     parser.add_argument('--output_gb_data')
     parser.add_argument('--output_rendered_frames')
 
@@ -221,6 +243,15 @@ if __name__ == '__main__':
             x,y,z = normals[i][j]
             dist = (x**2 + y**2 + z**2)**0.5
             normals[i][j] /= dist
+    
+    # Add outline
+    # A normal of (0,0,2) indicates this outline.
+    mask = (normals == np.array([0.0, 0.0, 0.0])).all(axis=-1)
+    edges = mask_outline(mask)
+    for i in range(H):
+        for j in range(W):
+            if edges[i][j]:
+                normals[i][j] = np.array([0.0, 0.0, 2.0])
     
     Lz = args.light_z
     print(f'Light-z = {Lz}')
@@ -291,7 +322,7 @@ if __name__ == '__main__':
         # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
         MAX_CHUNK_SIZE = 15
 
-        allocator = RomBankAllocator('NORMALDATA')
+        allocator = RomBankAllocator(f'{args.label_prefix}NORMALDATA')
 
 
         def encode_tiles(tiles):

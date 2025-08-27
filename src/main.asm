@@ -54,6 +54,31 @@ Render_TileStart:
 Render_NumTiles:
     db
 
+wInputDpad:
+    db
+wInputButtons:
+    db
+wLeftRightBalance:
+    db
+wUpDownBalance:
+    db
+wVelocityCounter:
+    db
+wVelocity1:
+    db
+wVelocity2:
+    db
+
+DEF INPUT_DPAD_UP    EQU %00000100
+DEF INPUT_DPAD_DOWN  EQU %00001000
+DEF INPUT_DPAD_LEFT  EQU %00000010
+DEF INPUT_DPAD_RIGHT EQU %00000001
+
+DEF INPUT_DPAD_UP_BIT EQU 2
+DEF INPUT_DPAD_DOWN_BIT EQU 3
+DEF INPUT_DPAD_LEFT_BIT EQU 1
+DEF INPUT_DPAD_RIGHT_BIT EQU 0
+
 SECTION "Main",ROM0
 
 MACRO SET_VBLANK
@@ -202,6 +227,156 @@ SetupFrame:
 
     ret
 
+ReadInput::
+    ; Read D-Pad
+    ld a, %00100000
+    ldh [rP1], a
+    ldh a, [rP1]
+    ld [wInputDpad], a
+
+    ; Read buttons
+    ld a, %00010000
+    ldh [rP1], a
+    ldh a, [rP1]
+    ld [wInputButtons], a
+
+    ; Set balance variables
+    ; Left/Right balance
+
+    ld a, [wInputDpad]
+    bit INPUT_DPAD_LEFT_BIT, a
+    jr nz, .lr_notleft
+
+    ld a, -1
+    jr .lr_done
+
+.lr_notleft:
+    bit INPUT_DPAD_RIGHT_BIT, a
+    jr nz, .lr_notright
+
+    ld a, 1
+    jr .lr_done
+
+.lr_notright:
+    xor a
+.lr_done:
+    ld [wLeftRightBalance], a
+
+    ; Up/Down balance
+
+    ld a, [wInputDpad]
+    bit INPUT_DPAD_DOWN_BIT, a
+    jr nz, .du_notdown
+
+    ld a, -1
+    jr .du_done
+
+.du_notdown:
+    bit INPUT_DPAD_UP_BIT, a
+    jr nz, .du_notup
+
+    ld a, 1
+    jr .du_done
+
+.du_notup:
+    xor a
+.du_done:
+    ld [wUpDownBalance], a
+
+    ret
+
+
+UpdateVelocity::
+    ; Only update the velocity once every certain number of frames
+    ld a, [wVelocityCounter]
+    inc a
+    ld [wVelocityCounter], a
+    cp a, 6
+    ; Return early if it's not our turn
+    ret nz
+
+    xor a
+    ld [wVelocityCounter], a
+
+_UpdateVelocity_1:
+
+
+    ld a, [wLeftRightBalance]
+    ld b, a
+
+    ld a, [wVelocity1]
+    add a, b
+    add a, b
+
+    jr z, .atzero
+
+    bit 7, a
+    jr z, .positive
+.negative:
+
+    cp a, 256-8
+    ; flagc = a > 256-8
+    jr nc, .negative_under
+    inc a
+.negative_under
+
+    inc a
+    jr .done
+
+.positive:
+
+    cp a, 8
+    ; flagc = a < 8
+    jr c, .positive_under
+    dec a
+.positive_under
+
+    dec a
+
+.atzero:
+.done:
+    ld [wVelocity1], a
+
+
+_UpdateVelocity_2:
+    ld a, [wUpDownBalance]
+    ld b, a
+
+    ld a, [wVelocity2]
+    add a, b
+    add a, b
+
+    jr z, .atzero
+
+    bit 7, a
+    jr z, .positive
+.negative:
+
+    cp a, 256-8
+    ; flagc = a > 256-8
+    jr nc, .negative_under
+    inc a
+.negative_under
+
+    inc a
+    jr .done
+
+.positive:
+
+    cp a, 8
+    ; flagc = a < 8
+    jr c, .positive_under
+    dec a
+.positive_under
+
+    dec a
+
+.atzero:
+.done:
+    ld [wVelocity2], a
+
+    ret
+
 VBlank:
     ; Load the VBlankRoutine function pointer and jump to it
     ld a, [VBlankRoutine]
@@ -240,7 +415,7 @@ ENDR
     reti
 
 VBlank_SetupFrame:
-    ld hl, FRAME1
+    ld hl, FRAME03
     call SetupFrame
     SET_VBLANK VBlank_Shader
     reti
@@ -278,15 +453,33 @@ VBlank_Shader:
     ; B = num_tiles
     call VRamDma
 
-    ; Run the shader
+    call ReadInput
 
+    call UpdateVelocity
+
+
+    ; If button is pressed, change frame
+    ld a, [wInputButtons]
+    bit 0, a
+    jr nz, .skip
+
+
+    ld hl, FRAME04
+    call SetupFrame
+
+.skip
+
+
+    ld a, [wVelocity2]
+    ld b, a
 
     ld a, [Shader_Lt]
-    inc a
+    add a, b
     ld [Shader_Lt], a
+
+
     call SetShaderState
 
-    ; Load 
 
     ld a, [CurTileChunkPtr]
     ld l, a
@@ -396,7 +589,7 @@ DoubleSpeed:
 ;   HL = Destination address. The lower 4 bytes are ignored.
 ;   B  = number of bytes divided by 16
 ; Leaves DE and HL alone.
-VRamDma:
+VRamDma::
     dec b
 
     ; Source address
