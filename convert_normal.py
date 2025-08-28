@@ -4,9 +4,12 @@ import argparse
 
 from multiplication import Mult
 
-
-
 mult = Mult()
+
+# Coefficients to solve for lerp(a1, a2, dot_product)
+REMAP_A1 = 0.2
+REMAP_A2 = 0.770
+
 
 def mask_dilate(a):
     '''
@@ -72,11 +75,6 @@ def solve_coefficients(x, y, z, Lz):
     b = z*Lz
 
     return (n_theta, m, b)
-
-
-# Coefficients to solve for lerp(a1, a2, dot_product)
-REMAP_A1 = 0.2
-REMAP_A2 = 0.770
 
 
 def solve_coefficients_gameboy(x, y, z, Lz):
@@ -195,27 +193,12 @@ def convert_to_tiles(normals):
     return coll
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('input_image')
-    parser.add_argument('--exr_layer_name', '-l')
-    parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
-    parser.add_argument('--noise', type=float, default=0.0)
-    parser.add_argument('--light_z', '-lz', type=float, default=0.4)
-    parser.add_argument('--label_prefix', default='')
-    parser.add_argument('--output_gb_data')
-    parser.add_argument('--output_rendered_frames')
-
-    args = parser.parse_args()
-
-    # Make the noise reproducable
-    np.random.seed(0)
-
-    normals = load_exr_layer(args.input_image, args.exr_layer_name)
+def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.0):
+    normals = load_exr_layer(filepath, exr_layer_name)
     H,W,_ = normals.shape
 
     # Convert normals to Y-up right-handed, if needed
-    if args.normal_coordinates == 'Zup':
+    if normal_coordinates == 'Zup':
         for i in range(H):
             for j in range(W):
                 x,y,z = normals[i][j]
@@ -235,7 +218,7 @@ if __name__ == '__main__':
                 continue
 
             # Add some random noise to the normals, to add pseudo-dithering
-            if args.noise > 0:
+            if noise > 0:
                 for k in range(2):
                     normals[i][j][k] += (np.random.rand()*2 - 1) * args.noise
 
@@ -253,6 +236,50 @@ if __name__ == '__main__':
             if edges[i][j]:
                 normals[i][j] = np.array([0.0, 0.0, 2.0])
     
+    return normals
+
+
+def run_length_encoding(iterable):
+    '''
+    Accepts an iterable object.
+    Returns a generator that yields (value, count)
+    '''
+    from itertools import groupby
+    for key,group in groupby(iterable):
+        yield (key, sum(1 for _ in group))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('input_images', nargs='+')
+    parser.add_argument('--exr_layer_name', '-l')
+    parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
+    parser.add_argument('--noise', type=float, default=0.0)
+    parser.add_argument('--light_z', '-lz', type=float, default=0.4)
+    parser.add_argument('--label_prefix', default='')
+    parser.add_argument('--output_gb_data')
+    parser.add_argument('--output_rendered_frames')
+
+    args = parser.parse_args()
+
+    # Make the noise reproducable
+    np.random.seed(0)
+
+    all_normals = []
+    for img_filepath in args.input_images:
+        n = image_to_normals(
+            img_filepath,
+            normal_coordinates=args.normal_coordinates,
+            exr_layer_name=args.exr_layer_name,
+            noise=args.noise
+        )
+        all_normals.append(n)
+
+    all_normals = np.stack(all_normals)
+    # Shape: [images x H x W x 3]
+
+    normals = all_normals[0]
+
     Lz = args.light_z
     print(f'Light-z = {Lz}')
 
@@ -329,14 +356,48 @@ if __name__ == '__main__':
             # Write the tiles in reverse order and with reversed rows. Columns are the same order.
             # The shader decrements its output buffer pointer as it progresses, so we have to compensate this way.
 
-            data = bytearray()
+            rowbuf = []
 
             for tx, ty, tile in reversed(tiles):
                 for row in reversed(tile):
+                    pixelbuf = []
                     for normal in row:
                         x,y,z = normal
                         n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
+                        pixelbuf.append((n_theta, m_log, b))
+                    rowbuf.append(pixelbuf)
+            
+
+            data = bytearray()
+
+            ZERO_ROW = [(0, mult.float_to_log(0), 0)]*8
+
+            # Check for consecutive values to do run-length encoding
+            for row,count in run_length_encoding(rowbuf):
+                # If we ever have two rows or more of 0's, encode it as a run-length encoding of "0"s.
+                if row == ZERO_ROW and count >= 2:
+                    n = count // 2
+                    while n >= 256:
+                        # Note: a run-length of 0 = 256.
+                        # Equivalent to writing 512 rows, or 64 tiles
+                        data += bytearray([0, 0])
+                        n -= 256
+
+                    data += bytearray([0, n])
+                    
+                    count -= (count//2)*2
+                    # Remaining rows will be encoded the normal way
+                
+                for _ in range(count):
+                    i = 0
+                    for n_theta, m_log, b in row:
+                        if i == 0 and n_theta == 0:
+                            # If a row begins with 0, it represents RLE. We can't encode 0 here.
+                            # An angle of 1/256 (1.4 degrees) is practically unnoticable.
+                            n_theta = 1
                         data += bytearray([n_theta, m_log, b])
+
+                        i += 1
             
             return data
 
