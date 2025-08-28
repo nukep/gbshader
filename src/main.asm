@@ -69,6 +69,11 @@ wVelocity1:
 wVelocity2:
     db
 
+
+wCurFrameTick::
+    dw
+
+
 DEF INPUT_DPAD_UP    EQU %00000100
 DEF INPUT_DPAD_DOWN  EQU %00001000
 DEF INPUT_DPAD_LEFT  EQU %00000010
@@ -172,11 +177,11 @@ SetPalette:
     ret
 
 
-; Writes the tilemap to VRAM, and initializes frame data
+; Writes the tilemap to VRAM,
 ;
 ; Input:
-;   HL = Pointer to frame data
-SetupFrame:
+;   HL = Pointer to tilemap layout data
+SetupTilemapLayout:
     ; Read layout data
 .read_layout_command
     ld a, [hl+]
@@ -198,7 +203,7 @@ SetupFrame:
 
     ; T_END
 
-    jr .done_layout
+    ret
 
 .cont2
 
@@ -210,7 +215,10 @@ SetupFrame:
 
     jr .read_layout_command
 
-.done_layout
+
+; Input:
+;   HL = Tile data
+SetupTileChunks::
 
     ld a, [hl+]
     ; A = number of tile chunks
@@ -226,6 +234,7 @@ SetupFrame:
     ld [CurTileChunkPtr+1], a
 
     ret
+
 
 ReadInput::
     ; Read D-Pad
@@ -377,6 +386,111 @@ _UpdateVelocity_2:
 
     ret
 
+UpdateCurrentFrame::
+    ld a, [wCurFrameTick+1]
+    ld b, a
+    ld a, [wCurFrameTick+0]
+    ld c, a
+
+    ld a, [wVelocity1]
+    ld h, 0
+    ld l, a
+    bit 7, a
+    jr z, .vel_positive
+    ld h, $FF
+.vel_positive
+
+
+    add hl,hl
+    add hl,hl
+    add hl,hl
+    add hl,hl
+
+    add hl, bc
+    ; HL = wCurFrameTick + wVelocity1*16
+    ; H is the frame number that should be rendered.
+
+    ; if HL < 0, keep it within bounds (0 <= H < NUM_FRAMES)
+    bit 7, h
+    jr z, .justfine1
+    ;Underflow: h < 0
+    ld a, h
+    add a, NUM_FRAMES
+    ld h, a
+
+    jr .justfine2
+
+.justfine1:
+    ; if H >= NUM_FRAMES, keep it within bounds (0 <= H < NUM_FRAMES)
+    ld a, h
+    cp a, NUM_FRAMES
+    ; flagC = a < NUM_FRAMES
+    jr c, .justfine2
+
+    sub a, NUM_FRAMES
+    ld h, a
+
+.justfine2:
+
+    ; HL = (wCurFrameTick + wVelocity1*4) % (NUM_FRAMES*256)
+    ; H is the frame number that should be rendered.
+
+    ; If this number is different than the previous one, trigger a change
+    ld a, [wCurFrameTick+1]
+    ld d, a
+
+    ; Save HL to memory
+    ld a, h
+    ld [wCurFrameTick+1], a
+    ld a, l
+    ld [wCurFrameTick+0], a
+
+    ld a, d
+    ; A = old frame number
+    ; H = new frame number
+
+    cp a, h
+    jr z, .same
+
+    ld a, h
+    ; A = new frame number
+    ld h, 0
+    ld l, a
+    ; HL = new frame number
+    add hl, hl
+    ; HL = frame*2
+
+    ld bc, FRAMES
+    add hl, bc
+    ; HL = FRAMES + frame*2
+
+    ld a, [hl+]
+    ld b, a
+    ; B = lo
+    ld a, [hl+]
+    ld h, a
+    ; H = hi
+    ld a, b
+    ld l, a
+    ; L = lo
+
+    ; Change frame!
+    call SetupTileChunks
+
+.same:
+
+    ret
+
+UpdateLightAngle::
+    ld a, [wVelocity2]
+    ld b, a
+
+    ldh a, [hShader_Lt]
+    add a, b
+    ldh [hShader_Lt], a
+
+    ret
+
 VBlank:
     ; Load the VBlankRoutine function pointer and jump to it
     ld a, [VBlankRoutine]
@@ -415,8 +529,10 @@ ENDR
     reti
 
 VBlank_SetupFrame:
-    ld hl, FRAME03
-    call SetupFrame
+    ld hl, TILEMAP_LAYOUT
+    call SetupTilemapLayout
+    ld hl, FRAME00
+    call SetupTileChunks
     SET_VBLANK VBlank_Shader
     reti
 
@@ -457,25 +573,9 @@ VBlank_Shader:
 
     call UpdateVelocity
 
+    call UpdateCurrentFrame
 
-    ; If button is pressed, change frame
-    ld a, [wInputButtons]
-    bit 0, a
-    jr nz, .skip
-
-
-    ld hl, FRAME04
-    call SetupFrame
-
-.skip
-
-
-    ld a, [wVelocity2]
-    ld b, a
-
-    ldh a, [hShader_Lt]
-    add a, b
-    ldh [hShader_Lt], a
+    call UpdateLightAngle
 
 
     call SetShaderState

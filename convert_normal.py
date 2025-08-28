@@ -101,24 +101,6 @@ def solve_coefficients_gameboy(x, y, z, Lz):
     return n_theta, m, b
 
 
-def solve_dot(x, y, z, Lz, L_theta):
-    n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
-    L_theta = round(L_theta / (2 * np.pi) * 256) & 0xFF
-
-    v = mult.log_to_fixed(m_log + mult.cos_fixed_to_log(n_theta - L_theta)) + b
-
-    v = v & 0xFF
-
-    if v >= 128:
-        return 0
-
-    v = v << 1
-    v = v & 0b11000000
-    idx = v >> 6
-
-    return idx
-
-
 def split_to_tiles(arr, size):
     '''
     Takes an array of shape (H, W, *) and returns (H/s, W/s, s, s, *).
@@ -131,16 +113,23 @@ def split_to_tiles(arr, size):
 class TileCollection:
     def __init__(self):
         self._tiles = []
+        self._tiles_lookup = {}
+        self._zero_tile = np.zeros((8, 8, 3), dtype=float)
         self._dropped = 0
     
     def add(self, x, y, tile):
         self._tiles.append((x, y, tile))
+        self._tiles_lookup[(x,y)] = tile
     
     def log_dropped(self, x, y):
         self._dropped += 1
 
     def __iter__(self):
         return iter(self._tiles)
+    
+    def get(self, x, y):
+        tile = self._tiles_lookup.get((x,y), self._zero_tile)
+        return tile
 
 
 class RomBankAllocator:
@@ -249,81 +238,112 @@ def run_length_encoding(iterable):
         yield (key, sum(1 for _ in group))
 
 
+def encode_tiles(tiles, Lz):
+    # Write the tiles in reverse order and with reversed rows. Columns are the same order.
+    # The shader decrements its output buffer pointer as it progresses, so we have to compensate this way.
+
+    rowbuf = []
+
+    for tile in reversed(tiles):
+        for row in reversed(tile):
+            pixelbuf = []
+            for normal in row:
+                x,y,z = normal
+                n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
+                pixelbuf.append((n_theta, m_log, b))
+            rowbuf.append(pixelbuf)
+    
+
+    data = bytearray()
+
+    ZERO_ROW = [(0, mult.float_to_log(0), 0)]*8
+
+    # Check for consecutive values to do run-length encoding
+    for row,count in run_length_encoding(rowbuf):
+        # If we ever have two rows or more of 0's, encode it as a run-length encoding of "0"s.
+        if row == ZERO_ROW and count >= 2:
+            n = count // 2
+            while n >= 256:
+                # Note: a run-length of 0 = 256.
+                # Equivalent to writing 512 rows, or 64 tiles
+                data += bytearray([0, 0])
+                n -= 256
+
+            data += bytearray([0, n])
+            
+            count -= (count//2)*2
+            # Remaining rows will be encoded the normal way
+        
+        for _ in range(count):
+            i = 0
+            for n_theta, m_log, b in row:
+                if i == 0 and n_theta == 0:
+                    # If a row begins with 0, it represents RLE. We can't encode 0 here.
+                    # An angle of 1/256 (1.4 degrees) is practically unnoticable.
+                    n_theta = 1
+                data += bytearray([n_theta, m_log, b])
+
+                i += 1
+    
+    return data
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('input_images', nargs='+')
     parser.add_argument('--exr_layer_name', '-l')
+    parser.add_argument('--serialize', type=str, required=False)
     parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
     parser.add_argument('--noise', type=float, default=0.0)
     parser.add_argument('--light_z', '-lz', type=float, default=0.4)
     parser.add_argument('--label_prefix', default='')
     parser.add_argument('--output_gb_data')
-    parser.add_argument('--output_rendered_frames')
 
     args = parser.parse_args()
 
     # Make the noise reproducable
     np.random.seed(0)
 
-    all_normals = []
-    for img_filepath in args.input_images:
-        n = image_to_normals(
-            img_filepath,
-            normal_coordinates=args.normal_coordinates,
-            exr_layer_name=args.exr_layer_name,
-            noise=args.noise
-        )
-        all_normals.append(n)
+    if len(args.input_images) == 1 and args.input_images[0].endswith('.npy'):
+        # Load the serialized numpy array
+        all_normals = np.load(args.input_images[0])
+    else:
+        all_normals = []
+        for img_filepath in args.input_images:
+            n = image_to_normals(
+                img_filepath,
+                normal_coordinates=args.normal_coordinates,
+                exr_layer_name=args.exr_layer_name,
+                noise=args.noise
+            )
+            all_normals.append(n)
 
-    all_normals = np.stack(all_normals)
-    # Shape: [images x H x W x 3]
+        all_normals = np.stack(all_normals)
+        # Shape: [images x H x W x 3]
 
-    normals = all_normals[0]
+    if args.serialize:
+        np.save(args.serialize, all_normals)
+        print(f'Wrote {args.serialize}')
 
-    Lz = args.light_z
-    print(f'Light-z = {Lz}')
-
-    if args.output_rendered_frames:
-        # Render an animation
-
-        import pathlib
-        import cv2
-
-        frames_path = pathlib.Path(args.output_rendered_frames)
-        frames_path.mkdir(parents=True, exist_ok=True)
-
-        GB_PALETTE = [
-            [0x08, 0x18, 0x20],
-            [0x34, 0x68, 0x56],
-            [0x88, 0xc0, 0x70],
-            [0xe0, 0xf8, 0xd0]
-        ]
-        GB_PALETTE = [np.array(x) for x in GB_PALETTE]
-
-        NUM_FRAMES = 64
-
-        for frame in range(NUM_FRAMES):
-            rows = []
-
-            L_theta = 6.28 * (frame/NUM_FRAMES)
-
-            for i in range(H):
-                cols = []
-                for j in range(W):
-                    N = normals[i][j]
-                    cols.append(GB_PALETTE[solve_dot(N[0],N[1],N[2], Lz, L_theta)])
-                rows.append(cols)
-
-            data = np.array(rows)
-            out_path = frames_path / f'{frame:02d}.png'
-            cv2.imwrite(out_path.absolute(), data)
-            print(f'Wrote {out_path}')
-    
     if args.output_gb_data:
+        Lz = args.light_z
+        print(f'Light-z = {Lz}')
+
         filepath = args.output_gb_data
 
-        coll = convert_to_tiles(normals)
-        all_tiles = list(coll)
+        colls = [convert_to_tiles(normals) for normals in all_normals]
+
+        # Get the merged layout
+        layout = set()
+        for coll in colls:
+            for (tx,ty,_) in coll:
+                layout.add((tx, ty))
+        
+        # Sort by top-to-bottom, left-to-right
+        layout = sorted([(y,x) for x,y in layout])
+        layout = [
+            (x,y) for y,x in layout
+        ]
 
         outfile = open(filepath, 'w')
 
@@ -332,8 +352,11 @@ if __name__ == '__main__':
         
         # Tile layout
 
+        output(f'SECTION "TILEMAP_LAYOUT", ROM0')
+        output(f'TILEMAP_LAYOUT::')
+
         prev_xy = (None, None)
-        for i, (tx, ty, _) in enumerate(all_tiles):
+        for i, (tx, ty) in enumerate(layout):
             if prev_xy[0] == tx-1 and prev_xy[1] == ty:
                 # This tile is immediately to the right of the previous one
                 # We don't need to encode POS
@@ -346,77 +369,44 @@ if __name__ == '__main__':
         
         # Tile chunks
 
-        # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
-        MAX_CHUNK_SIZE = 15
+        output(f'SECTION "FRAMES::", ROM0')
+        output(f'EXPORT DEF NUM_FRAMES EQU {len(colls)}')
+        output(f'FRAMES::')
+        for framenum in range(len(colls)):
+            output(f'  dw FRAME{framenum:02}')
 
         allocator = RomBankAllocator(f'{args.label_prefix}NORMALDATA')
 
+        for framenum, coll in enumerate(colls):
 
-        def encode_tiles(tiles):
-            # Write the tiles in reverse order and with reversed rows. Columns are the same order.
-            # The shader decrements its output buffer pointer as it progresses, so we have to compensate this way.
+            # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
+            # TODO: consider empty rows
+            MAX_CHUNK_SIZE = 15
 
-            rowbuf = []
+            all_tiles = [
+                coll.get(x, y)
+                for x,y in layout
+            ]
 
-            for tx, ty, tile in reversed(tiles):
-                for row in reversed(tile):
-                    pixelbuf = []
-                    for normal in row:
-                        x,y,z = normal
-                        n_theta, m_log, b = solve_coefficients_gameboy(x, y, z, Lz)
-                        pixelbuf.append((n_theta, m_log, b))
-                    rowbuf.append(pixelbuf)
-            
+            output(f'SECTION "FRAME{framenum:02}", ROM0')
+            output(f'FRAME{framenum:02}::')
 
-            data = bytearray()
+            num_chunks = math.ceil(len(all_tiles) / MAX_CHUNK_SIZE)
+            output(f'TILECHUNKS {num_chunks}')
+            for ch in range(num_chunks):
+                tiles = all_tiles[ch*MAX_CHUNK_SIZE : (ch+1)*MAX_CHUNK_SIZE]
+                num_tiles = len(tiles)
+                first_tile_num = ch*MAX_CHUNK_SIZE
 
-            ZERO_ROW = [(0, mult.float_to_log(0), 0)]*8
+                data = encode_tiles(tiles, Lz)
 
-            # Check for consecutive values to do run-length encoding
-            for row,count in run_length_encoding(rowbuf):
-                # If we ever have two rows or more of 0's, encode it as a run-length encoding of "0"s.
-                if row == ZERO_ROW and count >= 2:
-                    n = count // 2
-                    while n >= 256:
-                        # Note: a run-length of 0 = 256.
-                        # Equivalent to writing 512 rows, or 64 tiles
-                        data += bytearray([0, 0])
-                        n -= 256
+                data_label = allocator.allocate(data)
 
-                    data += bytearray([0, n])
-                    
-                    count -= (count//2)*2
-                    # Remaining rows will be encoded the normal way
-                
-                for _ in range(count):
-                    i = 0
-                    for n_theta, m_log, b in row:
-                        if i == 0 and n_theta == 0:
-                            # If a row begins with 0, it represents RLE. We can't encode 0 here.
-                            # An angle of 1/256 (1.4 degrees) is practically unnoticable.
-                            n_theta = 1
-                        data += bytearray([n_theta, m_log, b])
+                output(f'TILECHUNK {data_label}, {num_tiles}, {first_tile_num}')
 
-                        i += 1
-            
-            return data
-
-        num_chunks = math.ceil(len(all_tiles) / MAX_CHUNK_SIZE)
-        output(f'TILECHUNKS {num_chunks}')
-        for ch in range(num_chunks):
-            tiles = all_tiles[ch*MAX_CHUNK_SIZE : (ch+1)*MAX_CHUNK_SIZE]
-            num_tiles = len(tiles)
-            first_tile_num = ch*MAX_CHUNK_SIZE
-
-            data = encode_tiles(tiles)
-
-            data_label = allocator.allocate(data)
-
-            output(f'TILECHUNK {data_label}, {num_tiles}, {first_tile_num}')
+            print(f'Number of tiles: {len(all_tiles)}')
 
         output(allocator.finish())
-
-        print(f'Number of tiles: {len(all_tiles)}')
 
         outfile.close()
 
