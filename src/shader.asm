@@ -1,6 +1,8 @@
 section "ShaderHRAM", HRAM
 ; Lt: L-theta
-Shader_Lt:: db
+hShader_Lt:: db
+
+hShaderDisableRle:: db
 
 hNumRows: db
 hOldStackPtr: dw
@@ -138,10 +140,7 @@ RunShader::
 
     ; If we want to disable run-length encoding of zeros,
     ; we replace the following with a custom payload
-    ;; push de; push de; dec a
-    ;;   D5 D5 3D
-    ;; jp RleDisableInjectPayload
-    ;;   C3 <LO> <HI>
+    ; (See SetShaderState)
 .inject_rlezero:
     ; jp RleDisableInjectPayload
 
@@ -293,19 +292,44 @@ CopyShaderCode::
     ld bc, ShaderROMLength
     jr Memcpy
 
-MACRO LD_INJECT
-    ld [(\1)], a
-ENDM
-
 ; Modify the shader executable using the state of the program, such as the light position.
 SetShaderState::
-    ld a, [Shader_Lt]
-    LD_INJECT RunShader.inject_lt_u1+1
-    LD_INJECT RunShader.inject_lt_u2+1
-    LD_INJECT RunShader.inject_lt_u3+1
-    LD_INJECT RunShader.inject_lt_u4+1
-    LD_INJECT RunShader.inject_lt_u5+1
-    LD_INJECT RunShader.inject_lt_u6+1
-    LD_INJECT RunShader.inject_lt_u7+1
-    LD_INJECT RunShader.inject_lt_u8+1
+    ldh a, [hShader_Lt]
+    ld [RunShader.inject_lt_u1+1], a
+    ld [RunShader.inject_lt_u2+1], a
+    ld [RunShader.inject_lt_u3+1], a
+    ld [RunShader.inject_lt_u4+1], a
+    ld [RunShader.inject_lt_u5+1], a
+    ld [RunShader.inject_lt_u6+1], a
+    ld [RunShader.inject_lt_u7+1], a
+    ld [RunShader.inject_lt_u8+1], a
+
+    ldh a, [hShaderDisableRle]
+    cp a, 0
+    jr z, .enable_rle
+
+    ; Disable RLE
+    ;; jp RleDisableInjectPayload
+    ;;   C3 <LO> <HI>
+    ld a, $c3
+    ld [RunShader.inject_rlezero+0], a
+    ld a, LOW(RleDisableInjectPayload)
+    ld [RunShader.inject_rlezero+1], a
+    ld a, HIGH(RleDisableInjectPayload)
+    ld [RunShader.inject_rlezero+2], a
+
+    jr .done
+
+.enable_rle:
+    ; Enable RLE
+    ;; push de; push de; dec a
+    ;;   D5 D5 3D
+    ld a, $d5
+    ld [RunShader.inject_rlezero+0], a
+    ld [RunShader.inject_rlezero+1], a
+    ld a, $3d
+    ld [RunShader.inject_rlezero+2], a
+
+.done:
+
     ret

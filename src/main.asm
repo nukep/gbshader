@@ -473,9 +473,9 @@ VBlank_Shader:
     ld a, [wVelocity2]
     ld b, a
 
-    ld a, [Shader_Lt]
+    ldh a, [hShader_Lt]
     add a, b
-    ld [Shader_Lt], a
+    ldh [hShader_Lt], a
 
 
     call SetShaderState
