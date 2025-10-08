@@ -216,21 +216,41 @@ SetupTilemapLayout:
     jr .read_layout_command
 
 
+; Sets TileChunkPtr and CurTileChunkPtr.
+; Accounts for the counter when setting CurTileChunkPtr.
+;
 ; Input:
 ;   HL = Tile data
 SetupTileChunks::
-
-    ld a, [hl+]
-    ; A = number of tile chunks
-
-    ld [NumTileChunks], a
-    ld [TileChunkCounter], a
+    ; Set TileChunkPtr = HL
 
     ld a, l
     ld [TileChunkPtr], a
-    ld [CurTileChunkPtr], a
     ld a, h
     ld [TileChunkPtr+1], a
+
+    ; Set CurTileChunkPtr to whatever offset it should be based on the current counter
+    ; CurTileChunkPtr = TileChunkPtr + (NumTileChunks - TileChunkCounter)*TILE_CHUNK_SIZE
+
+    ld a, [TileChunkCounter]
+    ld c, a
+    ld a, [NumTileChunks]
+    sub a, c
+    ; A = NumTileChunks - TileChunkCounter
+
+    cp a, 0
+    jr z, .done
+
+    ld bc, TILE_CHUNK_SIZE
+.loop:
+    add hl, bc
+    dec a
+    jr nz, .loop
+.done:
+
+    ld a, l
+    ld [CurTileChunkPtr], a
+    ld a, h
     ld [CurTileChunkPtr+1], a
 
     ret
@@ -473,6 +493,7 @@ UpdateCurrentFrame::
     ld a, b
     ld l, a
     ; L = lo
+    ; HL = 
 
     ; Change frame!
     call SetupTileChunks
@@ -504,8 +525,8 @@ VBlank_Init:
     reti
 
 VBlank_ClearScreen:
-    ; Set to tile 127
-    ld a, 127
+    ; Set to tile 0
+    xor a
 
     ld hl, $9800
     ld de, 12
@@ -525,10 +546,38 @@ ENDR
     dec b
     jr nz, .loop1
 
+    SET_VBLANK VBlank_SetupHud1
+    reti
+
+VBlank_SetupHud1:
+    ; Copy tiles to VRAM
+
+    ld de, TILES_HUD
+    ld hl, $9000
+    ld b, HUD_NUM_TILES
+    
+    ; HL = 9000
+    ; DE = OUT
+    ; B = num_tiles
+    call VRamDma
+
+    SET_VBLANK VBlank_SetupHud2
+    reti
+
+VBlank_SetupHud2:
+    ; Write tilemap to VRAM
+
+    ld hl, TILEMAP_HUD_LAYOUT
+    call SetupTilemapLayout
+
     SET_VBLANK VBlank_SetupFrame
     reti
 
 VBlank_SetupFrame:
+    ld a, NUM_TILE_CHUNKS
+    ld [NumTileChunks], a
+    ld [TileChunkCounter], a
+
     ld hl, TILEMAP_LAYOUT
     call SetupTilemapLayout
     ld hl, FRAME00
@@ -603,6 +652,7 @@ VBlank_Shader:
 
     ld a, [hl+]
     ; A = first tile number
+    add a, TILE_FIRST_NUM
     ld [Render_TileStart], a
 
     ld a, [Render_NumTiles]
@@ -690,6 +740,11 @@ DoubleSpeed:
 ;   B  = number of bytes divided by 16
 ; Leaves DE and HL alone.
 VRamDma::
+    ; Return early if B = 0
+    xor a
+    cp a, b
+    ret z
+
     dec b
 
     ; Source address

@@ -7,8 +7,8 @@ from multiplication import Mult
 mult = Mult()
 
 # Coefficients to solve for lerp(a1, a2, dot_product)
-REMAP_A1 = 0.2
-REMAP_A2 = 0.770
+REMAP_A1 = 0.4
+REMAP_A2 = 0.7650
 
 
 def mask_dilate(a):
@@ -30,7 +30,7 @@ def mask_outline(a):
     return mask_dilate(a) ^ a
 
 
-# Source for EXR loading logic: ChatGPT (with manual modifications afterwards)
+# Source for EXR loading logic: ChatGPT (AI) (with manual modifications afterwards)
 def load_exr_layer(path, layer_name):
     import OpenEXR, Imath
 
@@ -67,6 +67,26 @@ def load_exr_layer(path, layer_name):
     img = np.stack(channel_data, axis=-1)
     return img
 
+def load_rgb_image(filepath):
+    '''
+    Reads a RGB-encoded image. Remaps the channel values from [0,1] to [-1,+1].
+    '''
+    import cv2
+    data = cv2.imread(filepath, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    # OpenCV reads images in BGR order. Convert to RGB
+    data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
+
+    if data.dtype == np.uint16:
+        maxval = 65535
+    elif data.dtype == np.uint8:
+        maxval = 255
+    elif data.dtype == float:
+        maxval = 1.0
+    else:
+        raise Exception(f'Unknown image value type: {data.dtype}')
+    
+    data = (data / (maxval/2) - 1.0)
+    return data
 
 def solve_coefficients(x, y, z, Lz):
     n_theta = np.atan2(y, x)
@@ -182,8 +202,11 @@ def convert_to_tiles(normals):
     return coll
 
 
-def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.0):
-    normals = load_exr_layer(filepath, exr_layer_name)
+def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.0, outline=False):
+    if filepath.lower().endswith('.exr'):
+        normals = load_exr_layer(filepath, exr_layer_name)
+    else:
+        normals = load_rgb_image(filepath)
     H,W,_ = normals.shape
 
     # Convert normals to Y-up right-handed, if needed
@@ -195,15 +218,23 @@ def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.
                 normals[i][j][2] = -y
 
     # Pre-process the normals:
+    # - Detect constant color values
     # - Ensure all normals are either 0 or unit-length.
     # - Optionally, add noise.
     for i in range(H):
         for j in range(W):
             x,y,z = normals[i][j]
 
-            if x*x + y*y + z*z < 0.5:
+            dist2 = x*x + y*y + z*z
+
+            if dist2 < 0.5:
                 # This is probably empty space
                 normals[i][j] = np.array([0.0, 0.0, 0.0])
+                continue
+        
+            if dist2 > 2.0:
+                # This is probably white
+                normals[i][j] = np.array([0.0, 0.0, 2.0])
                 continue
 
             # Add some random noise to the normals, to add pseudo-dithering
@@ -217,13 +248,14 @@ def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.
             normals[i][j] /= dist
     
     # Add outline
-    # A normal of (0,0,2) indicates this outline.
-    mask = (normals == np.array([0.0, 0.0, 0.0])).all(axis=-1)
-    edges = mask_outline(mask)
-    for i in range(H):
-        for j in range(W):
-            if edges[i][j]:
-                normals[i][j] = np.array([0.0, 0.0, 2.0])
+    # A normal of (0,0,2) indicates white (this outline).
+    if outline:
+        mask = (normals == np.array([0.0, 0.0, 0.0])).all(axis=-1)
+        edges = mask_outline(mask)
+        for i in range(H):
+            for j in range(W):
+                if edges[i][j]:
+                    normals[i][j] = np.array([0.0, 0.0, 2.0])
     
     return normals
 
@@ -295,7 +327,8 @@ if __name__ == '__main__':
     parser.add_argument('--serialize', type=str, required=False)
     parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
     parser.add_argument('--noise', type=float, default=0.0)
-    parser.add_argument('--light_z', '-lz', type=float, default=0.4)
+    parser.add_argument('--outline', action='store_true', default=False)
+    parser.add_argument('--light_theta', '-lt', type=float, default=45)
     parser.add_argument('--label_prefix', default='')
     parser.add_argument('--output_gb_data')
 
@@ -314,7 +347,8 @@ if __name__ == '__main__':
                 img_filepath,
                 normal_coordinates=args.normal_coordinates,
                 exr_layer_name=args.exr_layer_name,
-                noise=args.noise
+                noise=args.noise,
+                outline=args.outline
             )
             all_normals.append(n)
 
@@ -326,7 +360,7 @@ if __name__ == '__main__':
         print(f'Wrote {args.serialize}')
 
     if args.output_gb_data:
-        Lz = args.light_z
+        Lz = np.cos(args.light_theta / 360.0 * 2*np.pi)
         print(f'Light-z = {Lz}')
 
         filepath = args.output_gb_data
@@ -369,8 +403,17 @@ if __name__ == '__main__':
         
         # Tile chunks
 
+        # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
+        # TODO: consider empty rows
+        MAX_CHUNK_SIZE = 15
+
+        expected_num_chunks = math.ceil(len(layout) / MAX_CHUNK_SIZE)
+
+        print(f'Number of tiles: {len(layout)}')
+
         output(f'SECTION "FRAMES::", ROM0')
         output(f'EXPORT DEF NUM_FRAMES EQU {len(colls)}')
+        output(f'EXPORT DEF NUM_TILE_CHUNKS EQU {expected_num_chunks}')
         output(f'FRAMES::')
         for framenum in range(len(colls)):
             output(f'  dw FRAME{framenum:02}')
@@ -378,11 +421,6 @@ if __name__ == '__main__':
         allocator = RomBankAllocator(f'{args.label_prefix}NORMALDATA')
 
         for framenum, coll in enumerate(colls):
-
-            # Batch this as 15 tiles at a time. (because that's how many tiles can be processed per frame in double-speed)
-            # TODO: consider empty rows
-            MAX_CHUNK_SIZE = 15
-
             all_tiles = [
                 coll.get(x, y)
                 for x,y in layout
@@ -392,7 +430,9 @@ if __name__ == '__main__':
             output(f'FRAME{framenum:02}::')
 
             num_chunks = math.ceil(len(all_tiles) / MAX_CHUNK_SIZE)
-            output(f'TILECHUNKS {num_chunks}')
+
+            assert(num_chunks == expected_num_chunks)
+
             for ch in range(num_chunks):
                 tiles = all_tiles[ch*MAX_CHUNK_SIZE : (ch+1)*MAX_CHUNK_SIZE]
                 num_tiles = len(tiles)
@@ -403,8 +443,6 @@ if __name__ == '__main__':
                 data_label = allocator.allocate(data)
 
                 output(f'TILECHUNK {data_label}, {num_tiles}, {first_tile_num}')
-
-            print(f'Number of tiles: {len(all_tiles)}')
 
         output(allocator.finish())
 

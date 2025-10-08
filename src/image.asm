@@ -1,3 +1,71 @@
 INCLUDE "image_macros.inc"
 
+EXPORT DEF TILE_CHUNK_SIZE EQU 5
+
+; Hardcoded... for now.
+EXPORT DEF HUD_NUM_TILES EQU 26
+EXPORT DEF TILE_FIRST_NUM EQU 26
+
+
+; Generated frame data
+
+T_SET_TILE_START HUD_NUM_TILES
+
 INCLUDE "../frames.generated.asm"
+
+
+; HUD tiles
+
+T_SET_TILE_START 0
+
+SECTION "TILES_HUD", ROM0
+
+TILES_HUD::
+
+INCBIN "./build/hud_tiledata.bin"
+
+SECTION "TILEMAP_HUD_LAYOUT", ROM0
+
+; TODO - automate this data from rgbgfx's tilemap output
+TILEMAP_HUD_LAYOUT::
+
+T_POS 4, 0
+T_TILE 1
+T_TILE 2
+T_TILE 3
+T_TILE 4
+
+T_POS 11, 0
+T_TILE 5
+T_TILE 6
+T_TILE 7
+T_TILE 8
+T_TILE 9
+
+T_POS 18, 16
+T_TILE 10
+T_TILE 11
+
+T_POS 0, 17
+T_TILE 12
+T_TILE 13
+T_TILE 14
+T_TILE 15
+
+T_POS 6, 17
+T_TILE 16
+T_TILE 17
+T_TILE 18
+T_TILE 19
+T_TILE 20
+T_TILE 21
+T_TILE 22
+T_TILE 23
+T_TILE 0
+T_TILE 0
+T_TILE 0
+T_TILE 0
+T_TILE 24
+T_TILE 25
+
+T_END
