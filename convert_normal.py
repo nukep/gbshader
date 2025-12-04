@@ -29,44 +29,6 @@ def mask_outline(a):
     '''
     return mask_dilate(a) ^ a
 
-
-# Source for EXR loading logic: ChatGPT (AI) (with manual modifications afterwards)
-def load_exr_layer(path, layer_name):
-    import OpenEXR, Imath
-
-    exr_file = OpenEXR.InputFile(path)
-    header = exr_file.header()
-
-    # Get size from data window
-    dw = header['dataWindow']
-    width  = dw.max.x - dw.min.x + 1
-    height = dw.max.y - dw.min.y + 1
-
-    FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-
-    # Find all channels belonging to this layer
-    all_channels = header['channels'].keys()
-    layer_channels = [ch[len(layer_name)+1:] for ch in all_channels if ch.startswith(layer_name + '.')]
-
-    if not layer_channels:
-        raise ValueError(f"Layer '{layer_name}' not found. Available: {list(all_channels)}")
-
-    # Pick X, Y, Z or R, G, B.
-    if 'X' in layer_channels and 'Y' in layer_channels and 'Z' in layer_channels:
-        picked_channels = ['X', 'Y', 'Z']
-    elif 'R' in layer_channels and 'G' in layer_channels and 'B' in layer_channels:
-        picked_channels = ['R', 'G', 'B']
-
-    channel_data = []
-    for ch in picked_channels:
-        raw = exr_file.channel(f'{layer_name}.{ch}', FLOAT)
-        arr = np.frombuffer(raw, dtype=np.float32).reshape((height, width))
-        channel_data.append(arr)
-
-    # Stack into HxWxC array
-    img = np.stack(channel_data, axis=-1)
-    return img
-
 def load_rgb_image(filepath):
     '''
     Reads a RGB-encoded image. Remaps the channel values from [0,1] to [-1,+1].
@@ -202,11 +164,8 @@ def convert_to_tiles(normals):
     return coll
 
 
-def image_to_normals(filepath, normal_coordinates, exr_layer_name=None, noise=0.0, outline=False):
-    if filepath.lower().endswith('.exr'):
-        normals = load_exr_layer(filepath, exr_layer_name)
-    else:
-        normals = load_rgb_image(filepath)
+def image_to_normals(filepath, normal_coordinates, noise=0.0, outline=False):
+    normals = load_rgb_image(filepath)
     H,W,_ = normals.shape
 
     # Convert normals to Y-up right-handed, if needed
@@ -323,7 +282,6 @@ def encode_tiles(tiles, Lz):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('input_images', nargs='+')
-    parser.add_argument('--exr_layer_name', '-l')
     parser.add_argument('--serialize', type=str, required=False)
     parser.add_argument('--normal_coordinates', '-n', choices=['Yup', 'Zup'], required=False, default='Yup')
     parser.add_argument('--noise', type=float, default=0.0)
@@ -346,7 +304,6 @@ if __name__ == '__main__':
             n = image_to_normals(
                 img_filepath,
                 normal_coordinates=args.normal_coordinates,
-                exr_layer_name=args.exr_layer_name,
                 noise=args.noise,
                 outline=args.outline
             )
