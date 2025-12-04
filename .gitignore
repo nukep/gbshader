@@ -1,2 +1,5 @@
 __pycache__
 src/build
+
+*.generated.asm
+*.generated.npy
