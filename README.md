@@ -4,6 +4,8 @@ A real-time shader on the Game Boy Color!
 
 The ROMs can be found in the GitHub Releases page.
 
+I wrote a blog post that goes into more technical detail: https://blog.otterstack.com/posts/202512-gbshader/
+
 ## Compilation
 
 To compile the demos, run `./compile_gbspin.sh` or `./compile_teapot.sh`.
