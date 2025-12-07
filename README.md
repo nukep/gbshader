@@ -1,5 +1,7 @@
 # Game Boy Color Shader ROM
 
+![](demo.gif)
+
 A real-time shader on the Game Boy Color!
 
 The ROMs can be found in the GitHub Releases page.
