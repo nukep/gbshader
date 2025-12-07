@@ -2,6 +2,8 @@
 
 set -e
 
+mkdir -p build
+
 rgbgfx hud.png -c '#000,#555,#aaa,#fff' -u -o build/hud_tiledata.bin -t build/hud_tilemap.bin -a build/hud_tileattr.bin
 
 rgbasm main.asm -o build/main.o

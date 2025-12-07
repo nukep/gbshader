@@ -8,4 +8,6 @@ python convert_normal.py frames.generated.npy -lt 65 --label_prefix "F_" --outpu
 cd src
 ./build.sh
 
+cp ./build/main.gb ../gbshader_gbspin.gb
+
 echo 'Built ROM successfully!'

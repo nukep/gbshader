@@ -3,3 +3,4 @@ src/build
 
 *.generated.asm
 *.generated.npy
+*.gb
