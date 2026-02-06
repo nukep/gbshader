@@ -1,33 +1,35 @@
-section "ShaderHRAM", HRAM
+SECTION "ShaderHRAM", HRAM
 ; Lt: L-theta
 hShader_Lt:: db
-
 hShaderDisableRle:: db
-
 hNumRows: db
 hOldStackPtr: dw
 
 
-section "ShaderROM", ROM0
+SECTION "Shader", ROM0
 
 ; Implements the simplified dot product:
 ;   v = m * cos(n_theta - l_theta) + b
 ;
 ; where v is the dot-product in linear-space.
+;
+; v is ultimately unpacked to the bits: sXY_____
+;   if s is 1, then v is negative and the resulting pixel is 0.
+;   if s is 0, then the pixel is XY. This is split into HighAcc (X) and LowAcc (Y), as per the GB's way of encoding tiles.
 
 ; The source data buffer encodes an array of 3 bytes per pixel:
-; - 1 byte: n_theta  (64 = 90 degrees, 128 = 180 degrees...)
+; - 1 byte: n_theta (Nt)  (64 = 90 degrees, 128 = 180 degrees...)
 ; - 1 byte: m_log    (log-space value of the above "m" coefficient)
 ; - 1 byte: b        (linear-space value)
 
 ; Global variables are:
-; - l_theta  (similar to n_theta, but is the angle of the light source)
+; - l_theta (Lt)  (similar to n_theta, but is the angle of the light source)
 
 
 ; Pseudocode:
 ;     For each row of pixels:
-;         Low = 0
-;         High = 0
+;         LowAcc = 0
+;         HighAcc = 0
 
 ;         firstbyte = *In
 ;         if firstbyte == 0:
@@ -58,17 +60,17 @@ section "ShaderROM", ROM0
 ;             rol A
 ;             if carry is set:
 ;                 # m is negative, so assign to 0
-;                 Low <<= 1
-;                 High <<= 1
+;                 HighAcc <<= 1
+;                 LowAcc <<= 1
 ;                 continue
 
 ;             rol A
-;             shift carry into LSB of Low
+;             shift carry into LSB of HighAcc
 ;             rol A
-;             shift carry into LSB of High
+;             shift carry into LSB of LowAcc
 
-;         *--Out = High
-;         *--Out = Low
+;         *--Out = HighAcc
+;         *--Out = LowAcc
 
 RleDisableInjectPayload:
     ld d, h
@@ -242,6 +244,7 @@ FOR N, 8
 ENDR
 
     ; Push the LowAcc and HighAcc values to the stack (i.e. our output buffer)
+    ; Buffer looks like: E D
     ; 16 cycles
     push de
 
@@ -260,12 +263,12 @@ ENDR
     ld sp, hl
     
     ret
+
 RunShader_End:
+ENDL
+
 
 DEF ShaderROMLength EQU (RunShader_End - RunShader)
-
-
-section "Shader", ROM0
 
 
 ; Copy bytes from one area to another.

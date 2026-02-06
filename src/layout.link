@@ -22,7 +22,6 @@ ROM0
 
     org $1000
     "Main"
-    "ShaderROM"
     "Shader"
 
     org $2000
@@ -41,8 +40,6 @@ WRAM0
 
     "ShaderExecutable"
     "MainMem"
-
-    org $D000
 
 HRAM
     org $FF80
