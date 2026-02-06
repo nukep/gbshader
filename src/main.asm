@@ -1,27 +1,24 @@
 INCLUDE "hardware.inc"
 
-SECTION "MainHRAM", HRAM
-    hFoo:: db
-
 SECTION "rst", ROM0
-; ds $40
+; No RST routines here!
 
 SECTION "vblank", ROM0
     jp VBlank
 
-SECTION "lcd", ROM0[$0048]
+SECTION "lcd", ROM0
     reti
 
-SECTION "timer", ROM0[$0050]
+SECTION "timer", ROM0
     reti
 
-SECTION "serial", ROM0[$0058]
+SECTION "serial", ROM0
     reti
 
-SECTION "joypad", ROM0[$0060]
+SECTION "joypad", ROM0
     reti
 
-SECTION "Header", ROM0[$0100]
+SECTION "Header", ROM0
 EntryPoint:
     jp Main
 
@@ -30,48 +27,32 @@ ds $50 - 3
 
 
 SECTION "DMA", WRAM0
-OUT:
-    ; Support up to 16 tiles (16 bytes each)
-    ds 16*16
-OUT_BOTTOM:
+; A buffer that gets populated before copying to VRAM
+; Support up to 16 tiles (16 bytes per tile)
+wDMA_OUT:           ds 16*16
+wDMA_OUT_BOTTOM:
 
 
 SECTION "MainMem", WRAM0
 
-VBlankRoutine:
-    dw
+wVBlankRoutine:     dw
 
-NumTileChunks:
-    db
-TileChunkCounter:
-    db
-TileChunkPtr:
-    dw
-CurTileChunkPtr:
-    dw
-Render_TileStart:
-    db
-Render_NumTiles:
-    db
+wNumTileChunks:     db
+wTileChunkCounter:  db
+wTileChunkPtr:      dw
+wCurTileChunkPtr:   dw
+wRender_TileStart:  db
+wRender_NumTiles:   db
 
-wInputDpad:
-    db
-wInputButtons:
-    db
-wLeftRightBalance:
-    db
-wUpDownBalance:
-    db
-wVelocityCounter:
-    db
-wVelocity1:
-    db
-wVelocity2:
-    db
+wInputDpad:         db
+wInputButtons:      db
+wLeftRightBalance:  db
+wUpDownBalance:     db
+wVelocityCounter:   db
+wVelocity1:         db
+wVelocity2:         db
 
-
-wCurFrameTick::
-    dw
+wCurFrameTick:      dw
 
 
 DEF INPUT_DPAD_UP    EQU %00000100
@@ -88,9 +69,9 @@ SECTION "Main",ROM0
 
 MACRO SET_VBLANK
     ld a, LOW(\1)
-    ld [VBlankRoutine], a
+    ld [wVBlankRoutine], a
     ld a, HIGH(\1)
-    ld [VBlankRoutine+1], a
+    ld [wVBlankRoutine+1], a
 ENDM
 
 Main:
@@ -216,27 +197,27 @@ SetupTilemapLayout:
     jr .read_layout_command
 
 
-; Sets TileChunkPtr and CurTileChunkPtr.
-; Accounts for the counter when setting CurTileChunkPtr.
+; Sets wTileChunkPtr and wCurTileChunkPtr.
+; Accounts for the counter when setting wCurTileChunkPtr.
 ;
 ; Input:
 ;   HL = Tile data
 SetupTileChunks::
-    ; Set TileChunkPtr = HL
+    ; Set wTileChunkPtr = HL
 
     ld a, l
-    ld [TileChunkPtr], a
+    ld [wTileChunkPtr], a
     ld a, h
-    ld [TileChunkPtr+1], a
+    ld [wTileChunkPtr+1], a
 
-    ; Set CurTileChunkPtr to whatever offset it should be based on the current counter
-    ; CurTileChunkPtr = TileChunkPtr + (NumTileChunks - TileChunkCounter)*TILE_CHUNK_SIZE
+    ; Set wCurTileChunkPtr to whatever offset it should be based on the current counter
+    ; wCurTileChunkPtr = wTileChunkPtr + (wNumTileChunks - wTileChunkCounter)*TILE_CHUNK_SIZE
 
-    ld a, [TileChunkCounter]
+    ld a, [wTileChunkCounter]
     ld c, a
-    ld a, [NumTileChunks]
+    ld a, [wNumTileChunks]
     sub a, c
-    ; A = NumTileChunks - TileChunkCounter
+    ; A = wNumTileChunks - wTileChunkCounter
 
     cp a, 0
     jr z, .done
@@ -249,9 +230,9 @@ SetupTileChunks::
 .done:
 
     ld a, l
-    ld [CurTileChunkPtr], a
+    ld [wCurTileChunkPtr], a
     ld a, h
-    ld [CurTileChunkPtr+1], a
+    ld [wCurTileChunkPtr+1], a
 
     ret
 
@@ -513,10 +494,10 @@ UpdateLightAngle::
     ret
 
 VBlank:
-    ; Load the VBlankRoutine function pointer and jump to it
-    ld a, [VBlankRoutine]
+    ; Load the wVBlankRoutine function pointer and jump to it
+    ld a, [wVBlankRoutine]
     ld l, a
-    ld a, [VBlankRoutine+1]
+    ld a, [wVBlankRoutine+1]
     ld h, a
     jp hl
 
@@ -556,9 +537,6 @@ VBlank_SetupHud1:
     ld hl, $9000
     ld b, HUD_NUM_TILES
     
-    ; HL = 9000
-    ; DE = OUT
-    ; B = num_tiles
     call VRamDma
 
     SET_VBLANK VBlank_SetupHud2
@@ -575,8 +553,8 @@ VBlank_SetupHud2:
 
 VBlank_SetupFrame:
     ld a, NUM_TILE_CHUNKS
-    ld [NumTileChunks], a
-    ld [TileChunkCounter], a
+    ld [wNumTileChunks], a
+    ld [wTileChunkCounter], a
 
     ld hl, TILEMAP_LAYOUT
     call SetupTilemapLayout
@@ -603,18 +581,18 @@ VBlank_Shader:
     ; DMA whatever we computed last frame
     ; Write to $9000 + (16*tile_start)
     ; tile_start is between 0 and 127 inclusive.
-    ld a, [Render_TileStart]
+    ld a, [wRender_TileStart]
     call Shl_A_4_To_BC
     ld hl, $9000
     add hl, bc
     ; HL = $9000 + (16*tile_start)
 
-    ld a, [Render_NumTiles]
+    ld a, [wRender_NumTiles]
     ld b, a
 
-    ld de, OUT
+    ld de, wDMA_OUT
     ; HL = 9000 + (16*tile_start)
-    ; DE = OUT
+    ; DE = wDMA_OUT
     ; B = num_tiles
     call VRamDma
 
@@ -630,9 +608,9 @@ VBlank_Shader:
     call SetShaderState
 
 
-    ld a, [CurTileChunkPtr]
+    ld a, [wCurTileChunkPtr]
     ld l, a
-    ld a, [CurTileChunkPtr+1]
+    ld a, [wCurTileChunkPtr+1]
     ld h, a
 
     ld a, [hl+]
@@ -648,67 +626,67 @@ VBlank_Shader:
 
     ld a, [hl+]
     ; A = number of tiles
-    ld [Render_NumTiles], a
+    ld [wRender_NumTiles], a
 
     ld a, [hl+]
     ; A = first tile number
     add a, TILE_FIRST_NUM
-    ld [Render_TileStart], a
+    ld [wRender_TileStart], a
 
-    ld a, [Render_NumTiles]
+    ld a, [wRender_NumTiles]
     ; A = number of tiles (note: always between 0 and 31)
 
     call Shl_A_4_To_BC
-    ld hl, OUT
+    ld hl, wDMA_OUT
     add hl, bc
-    ; HL = OUT + number_of_tiles*16
+    ; HL = wDMA_OUT + number_of_tiles*16
 
-    ld a, [Render_NumTiles]
+    ld a, [wRender_NumTiles]
     swap a
     rrca
     ; A = number_of_tiles*8
 
     ; DE = Source data address
-    ; HL = OUT + number_of_tiles*16
+    ; HL = wDMA_OUT + number_of_tiles*16
     ; A = number_of_tiles*8
     call RunShader
 
     ; Update the pointers
 
-    ld a, [TileChunkCounter]
+    ld a, [wTileChunkCounter]
     dec a
     jr nz, .nonzero
 
     ; Counter is zero.
     ; Reset the variables.
 
-    ; TileChunkCounter = NumTileChunks
-    ld a, [NumTileChunks]
-    ld [TileChunkCounter], a
+    ; wTileChunkCounter = wNumTileChunks
+    ld a, [wNumTileChunks]
+    ld [wTileChunkCounter], a
 
-    ; CurTileChunkPtr = TileChunkPtr
-    ld a, [TileChunkPtr]
-    ld [CurTileChunkPtr], a
-    ld a, [TileChunkPtr+1]
-    ld [CurTileChunkPtr+1], a
+    ; wCurTileChunkPtr = wTileChunkPtr
+    ld a, [wTileChunkPtr]
+    ld [wCurTileChunkPtr], a
+    ld a, [wTileChunkPtr+1]
+    ld [wCurTileChunkPtr+1], a
 
     jr .done
 
 .nonzero:
-    ; TileChunkCounter -= 1
-    ld [TileChunkCounter], a
+    ; wTileChunkCounter -= 1
+    ld [wTileChunkCounter], a
 
-    ; CurTileChunkPtr += 5
-    ld a, [CurTileChunkPtr]
+    ; wCurTileChunkPtr += 5
+    ld a, [wCurTileChunkPtr]
     ld l, a
-    ld a, [CurTileChunkPtr+1]
+    ld a, [wCurTileChunkPtr+1]
     ld h, a
     ld bc, 5
     add hl, bc
     ld a, l
-    ld [CurTileChunkPtr], a
+    ld [wCurTileChunkPtr], a
     ld a, h
-    ld [CurTileChunkPtr+1], a
+    ld [wCurTileChunkPtr+1], a
 
 .done:
 
