@@ -254,11 +254,9 @@ ENDR
 .end:
 
     ; Restore the old stack pointer
-    ; 40 cycles
-    ldh a, [hOldStackPtr]
-    ld l, a
-    ldh a, [hOldStackPtr+1]
-    ld h, a
+    ; 32 cycles
+    ld sp, hOldStackPtr
+    pop hl
     ld sp, hl
     
     ret
